@@ -42,3 +42,16 @@ const imageBuffer = await client.downloadImage(result.images[0]);
 - WebSocket progress tracking with configurable timeout (default 5 min)
 - Image upload via multipart form for img2img workflows
 - Extracts first output image from any output node automatically
+
+
+## LLM Compliance Integration
+This project interfaces with AI image generation (ComfyUI), making it subject to AI content labeling and transparency regulations.
+
+### Applicable Compliance Areas
+- **Content Labeling** (Template 03) — AI-generated images must be labeled per EU AI Act Art. 50
+- **Training Data Disclosure** (Template 05) — Document training data provenance for models used
+- **Transparency Documentation** (Template 01) — Document the AI system's capabilities
+- **Impact/Risk Assessment** (Template 06) — Assess impact of AI-generated content
+
+### Using the Compliance Skill
+The ai-compliance skill (skills/ai-compliance/) provides regulatory guidance for AI content generation across jurisdictions.
