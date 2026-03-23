@@ -9,6 +9,9 @@ import type {
   ExecuteResult,
   ProgressCallback,
   WebSocketMessage,
+  QueueResponse,
+  QueueClearResponse,
+  WebSocketEventListener,
 } from './types';
 
 /**
@@ -21,6 +24,7 @@ export class ComfyUIClient {
   private url: string;
   private wsUrl: string;
   private clientId: string;
+  private wsListeners: Map<string, WebSocketEventListener[]> = new Map();
 
   constructor(options: ComfyUIClientOptions = {}) {
     this.url = options.url || 'http://127.0.0.1:8188';
@@ -43,7 +47,56 @@ export class ComfyUIClient {
       throw new Error(`ComfyUI /prompt failed (${response.status}): ${text}`);
     }
 
-    return response.json();
+    return response.json() as Promise<QueuePromptResponse>;
+  }
+
+  /**
+   * Get the current queue status (running and pending prompts)
+   */
+  async getQueue(): Promise<QueueResponse> {
+    const response = await fetch(`${this.url}/queue`);
+
+    if (!response.ok) {
+      throw new Error(`ComfyUI /queue failed (${response.status})`);
+    }
+
+    return response.json() as Promise<QueueResponse>;
+  }
+
+  /**
+   * Clear all pending prompts from the queue
+   * @param unfinishedOnly If true, only clear unfinished prompts; if false, clear all
+   */
+  async clearQueue(unfinishedOnly: boolean = true): Promise<QueueClearResponse> {
+    const response = await fetch(`${this.url}/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: !unfinishedOnly }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`ComfyUI /queue POST failed (${response.status}): ${text}`);
+    }
+
+    return { status: 'ok' };
+  }
+
+  /**
+   * Remove a specific prompt from the queue by number
+   * @param queueNumber The queue number of the prompt to remove
+   */
+  async removeFromQueue(queueNumber: number): Promise<QueueClearResponse> {
+    const response = await fetch(`${this.url}/queue/${queueNumber}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`ComfyUI /queue/${queueNumber} DELETE failed (${response.status}): ${text}`);
+    }
+
+    return { status: 'ok' };
   }
 
   /**
@@ -56,7 +109,7 @@ export class ComfyUIClient {
       throw new Error(`ComfyUI /history failed (${response.status})`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as Record<string, HistoryResult>;
     return data[promptId];
   }
 
@@ -108,7 +161,30 @@ export class ComfyUIClient {
       throw new Error(`ComfyUI /upload/image failed (${response.status}): ${text}`);
     }
 
-    return response.json();
+    return response.json() as Promise<UploadImageResponse>;
+  }
+
+  /**
+   * Register a WebSocket event listener for a specific message type
+   * @param messageType The type of message to listen for (e.g., 'progress', 'executing')
+   * @param listener Callback function to handle the message
+   */
+  onWebSocketMessage(messageType: string, listener: WebSocketEventListener): () => void {
+    if (!this.wsListeners.has(messageType)) {
+      this.wsListeners.set(messageType, []);
+    }
+    this.wsListeners.get(messageType)!.push(listener);
+
+    // Return unsubscribe function
+    return () => {
+      const listeners = this.wsListeners.get(messageType);
+      if (listeners) {
+        const idx = listeners.indexOf(listener);
+        if (idx > -1) {
+          listeners.splice(idx, 1);
+        }
+      }
+    };
   }
 
   /**
@@ -129,9 +205,21 @@ export class ComfyUIClient {
         reject(new Error('ComfyUI execution timed out (5 min)'));
       }, 5 * 60 * 1000);
 
-      ws.on('message', async (data) => {
+      ws.on('message', async (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString()) as WebSocketMessage;
+
+          // Trigger registered listeners
+          const listeners = this.wsListeners.get(msg.type);
+          if (listeners) {
+            listeners.forEach(listener => {
+              try {
+                listener(msg);
+              } catch (e) {
+                console.error(`Error in WebSocket listener for ${msg.type}:`, e);
+              }
+            });
+          }
 
           // Progress update
           if (
@@ -139,7 +227,7 @@ export class ComfyUIClient {
             msg.data?.prompt_id === promptId
           ) {
             if (onProgress && msg.data.value !== undefined && msg.data.max !== undefined) {
-              onProgress(msg.data.value, msg.data.max);
+              onProgress(msg.data.value as number, msg.data.max as number);
             }
           }
 
@@ -163,16 +251,29 @@ export class ComfyUIClient {
           if (msg.type === 'execution_error' && msg.data?.prompt_id === promptId) {
             clearTimeout(timeout);
             ws.close();
-            reject(new Error(`ComfyUI execution error: ${JSON.stringify(msg.data)}`));
+            const errorMsg = msg.data?.exception_message || JSON.stringify(msg.data);
+            reject(new Error(`ComfyUI execution error: ${errorMsg}`));
+          }
+
+          // Execution exception
+          if (msg.type === 'execution_exception' && msg.data?.prompt_id === promptId) {
+            clearTimeout(timeout);
+            ws.close();
+            const errorMsg = msg.data?.exception_message || JSON.stringify(msg.data);
+            reject(new Error(`ComfyUI execution exception: ${errorMsg}`));
           }
         } catch (e) {
           // Ignore non-JSON messages (binary frames)
         }
       });
 
-      ws.on('error', (err) => {
+      ws.on('error', (err: Error) => {
         clearTimeout(timeout);
         reject(new Error(`ComfyUI WebSocket error: ${err.message}`));
+      });
+
+      ws.on('close', () => {
+        clearTimeout(timeout);
       });
     });
   }
