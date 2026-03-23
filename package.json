@@ -22,7 +22,7 @@
     "stable-diffusion",
     "websocket"
   ],
-  "author": "Justice",
+  "author": "Justice E. Chase",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
